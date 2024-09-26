@@ -98,6 +98,18 @@ func resourceDomain() *schema.Resource {
 
 				return false
 			}),
+			customdiff.ForceNewIf("advanced_options", func(_ context.Context, d *schema.ResourceDiff, meta interface{}) bool {
+				o, n := d.GetChange("advanced_options")
+				old_override := o.(map[string]interface{})["override_main_response_version"]
+				new_override := n.(map[string]interface{})["override_main_response_version"]
+				if old_override == new_override {
+					return false
+				}
+
+				// Changing the override_main_response_version option is only allowed as part of an engine version upgrade.
+				old_ver, new_ver := d.GetChange(names.AttrEngineVersion)
+				return old_ver == new_ver
+			}),
 			customdiff.ForceNewIfChange(names.AttrIPAddressType, func(_ context.Context, old, new, meta interface{}) bool {
 				return (old.(string) == string(awstypes.IPAddressTypeDualstack)) && old.(string) != new.(string)
 			}),
@@ -683,7 +695,7 @@ func resourceDomainCreate(ctx context.Context, d *schema.ResourceData, meta inte
 	}
 
 	if v, ok := d.GetOk("advanced_options"); ok {
-		input.AdvancedOptions = flex.ExpandStringValueMap(v.(map[string]interface{}))
+		input.AdvancedOptions = advancedOptionsForCreate(flex.ExpandStringValueMap(v.(map[string]interface{})))
 	}
 
 	if v, ok := d.GetOk("advanced_security_options"); ok {
@@ -1003,7 +1015,7 @@ func resourceDomainUpdate(ctx context.Context, d *schema.ResourceData, meta inte
 		}
 
 		if d.HasChange("advanced_options") {
-			input.AdvancedOptions = flex.ExpandStringValueMap(d.Get("advanced_options").(map[string]interface{}))
+			input.AdvancedOptions = advancedOptionsForUpdate(flex.ExpandStringValueMap(d.Get("advanced_options").(map[string]interface{})))
 		}
 
 		if d.HasChange("advanced_security_options") {
@@ -1129,8 +1141,9 @@ func resourceDomainUpdate(ctx context.Context, d *schema.ResourceData, meta inte
 
 		if d.HasChange(names.AttrEngineVersion) {
 			upgradeInput := opensearch.UpgradeDomainInput{
-				DomainName:    aws.String(d.Get(names.AttrDomainName).(string)),
-				TargetVersion: aws.String(d.Get(names.AttrEngineVersion).(string)),
+				DomainName:      aws.String(d.Get(names.AttrDomainName).(string)),
+				TargetVersion:   aws.String(d.Get(names.AttrEngineVersion).(string)),
+				AdvancedOptions: advancedOptionsForUpgrade(flex.ExpandStringValueMap(d.Get("advanced_options").(map[string]interface{}))),
 			}
 
 			_, err := conn.UpgradeDomain(ctx, &upgradeInput)
@@ -1444,6 +1457,32 @@ func advancedOptionsIgnoreDefault(o map[string]interface{}, n map[string]interfa
 	}
 
 	return n
+}
+
+func advancedOptionsForCreate(o map[string]string) map[string]string {
+	// The CreateDomain API supports all of the advanced options.
+	// See https://docs.aws.amazon.com/opensearch-service/latest/APIReference/API_CreateDomain.html#opensearchservice-CreateDomain-request-AdvancedOptions
+	return o
+}
+
+func advancedOptionsForUpdate(o map[string]string) map[string]string {
+	// See https://docs.aws.amazon.com/opensearch-service/latest/APIReference/API_UpdateDomainConfig.html#API_UpdateDomainConfig_RequestBody
+	filtered := map[string]string{}
+	for _, k := range []string{"indices.fielddata.cache.size", "indices.query.bool.max_clause_count", "rest.action.multi.allow_explicit_index"} {
+		if v, ok := o[k]; ok {
+			filtered[k] = v
+		}
+	}
+	return filtered
+}
+
+func advancedOptionsForUpgrade(o map[string]string) map[string]string {
+	// See https://docs.aws.amazon.com/opensearch-service/latest/APIReference/API_UpdateDomainConfig.html#API_UpdateDomainConfig_RequestBody
+	filtered := map[string]string{}
+	if v, ok := o["override_main_response_version"]; ok {
+		filtered["override_main_response_version"] = v
+	}
+	return filtered
 }
 
 // parseEngineVersion parses a domain's engine version string into engine type and semver string.
